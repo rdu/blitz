@@ -22,6 +22,11 @@ use super::resolve_calc_value;
 use crate::BaseDocument;
 use crate::stylo_to_parley;
 
+/// Extra advance (in device pixels) lines are broken with. Inline widths keep their fractions,
+/// so a line laid out at its own measured width may exceed it by float noise (~1e-5 px). An
+/// absolute 0.01 px stays above f32 noise up to widths of ~100,000 px and is invisible.
+const LINE_BREAK_TOLERANCE: f32 = 0.01;
+
 /// Subtract a child's margins from the definite axes of the available space it is laid out in.
 /// Taffy's convention is that the parent subtracts a child's margins from the available space
 /// before passing it to the child, and that the child does not subtract them again.
@@ -594,9 +599,16 @@ impl BaseDocument {
             return LayoutOutput::from_outer_size(clamped_size);
         }
 
+        // Inline widths are not rounded, so a shrink-to-fit box gets back (as its known width)
+        // its max-content width plus float noise from the `/ scale`, `* scale` and padding/border
+        // round trip; breaking lines at exactly that width can wrap the last word. Lines are
+        // therefore broken with a tolerance far below a visible pixel. `width` itself (the
+        // reported size and the float context) stays unchanged.
+        let fits = |advance: f32| advance + LINE_BREAK_TOLERANCE;
+
         #[cfg(not(feature = "floats"))]
         {
-            inline_layout.layout.break_all_lines(Some(width));
+            inline_layout.layout.break_all_lines(Some(fits(width)));
         }
 
         // Out-of-flow candidates bubbled up from this container and its in-flow subtree.
@@ -610,8 +622,8 @@ impl BaseDocument {
             let initial_slot = block_ctx.find_content_slot(0.0, Clear::None, None);
             let mut has_active_floats = initial_slot.segment_id.is_some();
             let state = breaker.state_mut();
-            state.set_layout_max_advance(width);
-            state.set_line_max_advance(initial_slot.width * scale);
+            state.set_layout_max_advance(fits(width));
+            state.set_line_max_advance(fits(initial_slot.width * scale));
             state.set_line_x(initial_slot.x * scale);
             state.set_line_y((initial_slot.y * scale) as f64);
 
@@ -636,12 +648,12 @@ impl BaseDocument {
                                 block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                             has_active_floats = next_slot.segment_id.is_some();
 
-                            state.set_line_max_advance(next_slot.width * scale);
+                            state.set_line_max_advance(fits(next_slot.width * scale));
                             state.set_line_x(next_slot.x * scale);
                             state.set_line_y((next_slot.y * scale) as f64);
                         } else {
                             state.set_line_x(0.0);
-                            state.set_line_max_advance(width);
+                            state.set_line_max_advance(fits(width));
                         }
 
                         continue;
@@ -693,7 +705,7 @@ impl BaseDocument {
                             block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                         has_active_floats = next_slot.segment_id.is_some();
 
-                        state.set_line_max_advance(next_slot.width * scale);
+                        state.set_line_max_advance(fits(next_slot.width * scale));
                         state.set_line_x(next_slot.x * scale);
                         state.set_line_y((next_slot.y * scale) as f64);
 

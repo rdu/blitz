@@ -15,7 +15,9 @@ fn labels_in_a_row_advance_by_their_unrounded_widths() {
     let h = Harness::from_html(&format!(
         "<body style='margin:0; font: 13.3px sans-serif'><div style='display:flex'>{row}</div></body>"
     ));
-    let xs: Vec<f32> = (0..10).map(|i| h.layout_rect(&format!("#s{i}")).x).collect();
+    let xs: Vec<f32> = (0..10)
+        .map(|i| h.layout_rect(&format!("#s{i}")).x)
+        .collect();
     let steps: Vec<f32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
     if steps.iter().all(|s| *s == 0.0) {
         return; // no font
