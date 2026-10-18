@@ -591,7 +591,12 @@ pub(crate) fn stroke_text<'a>(
         // out and "…" is drawn after the last one kept (in the font, size
         // and colour of the run where the line was cut). Boxes are rounded
         // to whole pixels: a line within one pixel of its box fits.
-        let limit = ellipsis.filter(|w| line.metrics().advance > *w + scale as f32);
+        let limit = ellipsis.filter(|w| {
+            // Inked end of the line: trailing (hanging) whitespace does not
+            // overflow, and alignment offsets count.
+            let m = line.metrics();
+            m.offset + m.advance - m.hanging_advance > *w + scale as f32
+        });
         let mut kept_end: Option<f32> = None;
         let mut cut_run: Option<EllipsisRun> = None;
 
@@ -667,6 +672,8 @@ pub(crate) fn stroke_text<'a>(
                                     baseline: g.y,
                                     glyphs,
                                     advance,
+                                    normalized_coords: normalized_coords.to_vec(),
+                                    embolden,
                                     transform: glyph_xform,
                                 });
                             }
@@ -748,6 +755,11 @@ pub(crate) fn stroke_text<'a>(
 
         if let (Some(_), Some(c)) = (limit, cut_run.take()) {
             let mut x = kept_end.unwrap_or(line.metrics().offset);
+            // Decorations end with the ellipsis.
+            let end = (x + c.advance) as f64;
+            for acc in deco_boxes.iter_mut() {
+                acc.max_x = acc.max_x.min(end);
+            }
             let glyphs: Vec<anyrender::Glyph> = c
                 .glyphs
                 .iter()
@@ -765,8 +777,8 @@ pub(crate) fn stroke_text<'a>(
                 &c.font,
                 c.font_size,
                 !FONT_EMBOLDEN_ENABLED,
-                &[],
-                kurbo::Vec2::default(),
+                &c.normalized_coords,
+                c.embolden,
                 Fill::NonZero,
                 &anyrender::Paint::from(c.color),
                 1.0,
@@ -816,6 +828,8 @@ struct EllipsisRun {
     /// Glyph ids and advances: "…", or "..." when the font has no "…".
     glyphs: Vec<(u32, f32)>,
     advance: f32,
+    normalized_coords: Vec<i16>,
+    embolden: kurbo::Vec2,
     transform: Option<Affine>,
 }
 

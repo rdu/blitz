@@ -51,6 +51,11 @@ use usvg::fontdb;
 #[cfg(feature = "svg")]
 static FONT_DB: RwLock<Option<Arc<fontdb::Database>>> = RwLock::new(None);
 
+/// Hashes of the font data registered so far (the same font is registered
+/// once, however many documents load it).
+#[cfg(feature = "svg")]
+static REGISTERED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
 #[cfg(feature = "svg")]
 fn with_font_db<R>(f: impl FnOnce(&mut Arc<fontdb::Database>) -> R) -> R {
     let mut guard = FONT_DB.write().unwrap_or_else(PoisonError::into_inner);
@@ -68,7 +73,18 @@ fn with_font_db<R>(f: impl FnOnce(&mut Arc<fontdb::Database>) -> R) -> R {
 /// `@font-face` fonts are registered automatically when they load.
 #[cfg(feature = "svg")]
 pub fn register_svg_font(data: &[u8]) {
+    use std::hash::{Hash, Hasher};
     let data = decode_font_bytes(data).into_owned();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    let hash = hasher.finish();
+    {
+        let mut seen = REGISTERED.lock().unwrap_or_else(PoisonError::into_inner);
+        if seen.contains(&hash) {
+            return;
+        }
+        seen.push(hash);
+    }
     with_font_db(|db| Arc::make_mut(db).load_font_data(data));
 }
 
@@ -79,6 +95,10 @@ pub fn register_svg_font(data: &[u8]) {
 /// system fonts, never call it).
 #[cfg(feature = "svg")]
 pub fn reset_svg_fonts_without_system_fonts() {
+    REGISTERED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
     *FONT_DB.write().unwrap_or_else(PoisonError::into_inner) =
         Some(Arc::new(fontdb::Database::new()));
 }
@@ -100,6 +120,14 @@ pub fn svg_font_families() -> Vec<String> {
 
 #[cfg(feature = "svg")]
 fn svg_font_db() -> Arc<fontdb::Database> {
+    // Read lock once initialised; the write lock is for init and registration.
+    if let Some(db) = FONT_DB
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
+        return Arc::clone(db);
+    }
     with_font_db(|db| Arc::clone(db))
 }
 

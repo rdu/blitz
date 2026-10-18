@@ -1,9 +1,7 @@
 //! Fonts can be registered for SVG text (`@font-face` fonts are registered
 //! the same way when they load), and an embedder can drop the system fonts.
 
-use blitz_dom::util::{
-    register_svg_font, reset_svg_fonts_without_system_fonts, svg_font_families,
-};
+use blitz_dom::util::{register_svg_font, reset_svg_fonts_without_system_fonts, svg_font_families};
 
 #[test]
 fn registering_a_font_for_svg_text_is_idempotent_and_ignores_garbage() {
