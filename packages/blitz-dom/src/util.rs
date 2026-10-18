@@ -40,15 +40,68 @@ pub fn decode_font_bytes(bytes: &[u8]) -> Cow<'_, [u8]> {
 }
 
 #[cfg(feature = "svg")]
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, PoisonError, RwLock};
 #[cfg(feature = "svg")]
 use usvg::fontdb;
+
+/// Fonts SVG text is drawn with. Until an embedder says otherwise: the
+/// system fonts (loaded on first use) plus every font registered with
+/// [`register_svg_font`] (which includes the `@font-face` fonts of every
+/// document).
 #[cfg(feature = "svg")]
-pub(crate) static FONT_DB: LazyLock<Arc<fontdb::Database>> = LazyLock::new(|| {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
-    Arc::new(db)
-});
+static FONT_DB: RwLock<Option<Arc<fontdb::Database>>> = RwLock::new(None);
+
+#[cfg(feature = "svg")]
+fn with_font_db<R>(f: impl FnOnce(&mut Arc<fontdb::Database>) -> R) -> R {
+    let mut guard = FONT_DB.write().unwrap_or_else(PoisonError::into_inner);
+    let db = guard.get_or_insert_with(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    });
+    f(db)
+}
+
+/// Makes a font (TTF/OTF bytes, WOFF/WOFF2 decoded first) available to SVG
+/// text, under the family names in the font itself. SVGs parsed afterwards
+/// can use it; SVGs parsed before keep the fonts they were drawn with.
+/// `@font-face` fonts are registered automatically when they load.
+#[cfg(feature = "svg")]
+pub fn register_svg_font(data: &[u8]) {
+    let data = decode_font_bytes(data).into_owned();
+    with_font_db(|db| Arc::make_mut(db).load_font_data(data));
+}
+
+/// Replaces the font database of SVG text with an empty one: no system
+/// fonts and no fonts registered so far, so SVG text is drawn with exactly
+/// the fonts registered afterwards and looks the same on every OS. Call it
+/// before the first SVG is parsed (embedders that want upstream's behaviour,
+/// system fonts, never call it).
+#[cfg(feature = "svg")]
+pub fn reset_svg_fonts_without_system_fonts() {
+    *FONT_DB.write().unwrap_or_else(PoisonError::into_inner) =
+        Some(Arc::new(fontdb::Database::new()));
+}
+
+/// The family names of all faces SVG text can use, sorted, without
+/// duplicates. Triggers loading of the system fonts if nothing replaced the
+/// database yet.
+#[cfg(feature = "svg")]
+pub fn svg_font_families() -> Vec<String> {
+    let mut names: Vec<String> = with_font_db(|db| {
+        db.faces()
+            .flat_map(|f| f.families.iter().map(|(n, _)| n.clone()))
+            .collect()
+    });
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[cfg(feature = "svg")]
+fn svg_font_db() -> Arc<fontdb::Database> {
+    with_font_db(|db| Arc::clone(db))
+}
 
 /// Which kind of CSS image layer list (`background-image` or `mask-image`) to
 /// flush from style to dedicated storage on the node.
@@ -157,7 +210,7 @@ pub fn walk_tree(indent: usize, node: &Node) {
 #[cfg(feature = "svg")]
 pub(crate) fn parse_svg_image(source: &[u8]) -> Result<crate::node::SvgImageData, usvg::Error> {
     let options = usvg::Options {
-        fontdb: Arc::clone(&*FONT_DB),
+        fontdb: svg_font_db(),
         ..Default::default()
     };
     crate::node::SvgImageData::from_data(source, &options)

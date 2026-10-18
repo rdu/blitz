@@ -1317,6 +1317,9 @@ impl BaseDocument {
                 self.apply_iframe_html(node_id, res.request_id, res.resolved_url, &html);
             }
             Resource::Font(bytes, overrides) => {
+                // SVG text resolves families in its own font database.
+                #[cfg(feature = "svg")]
+                crate::util::register_svg_font(&bytes);
                 let font = Blob::new(Arc::new(bytes));
 
                 // Build a `FontInfoOverride` from the `@font-face` descriptors
