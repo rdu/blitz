@@ -870,6 +870,14 @@ impl ElementCx<'_, '_> {
                 );
             }
 
+            // `text-overflow: ellipsis` on a box that does not show its
+            // overflow: lines wider than the content box end in "…".
+            let ellipsis = (matches!(
+                self.style.get_text().text_overflow.second,
+                style::values::specified::text::TextOverflowSide::Ellipsis
+            ) && !matches!(self.style.get_box().overflow_x, Overflow::Visible))
+            .then(|| self.node.final_layout().content_box_width() * self.scale as f32);
+
             // Render text
             let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
@@ -880,6 +888,7 @@ impl ElementCx<'_, '_> {
                 self.scale,
                 self.node.id,
                 &mut draw_text_context,
+                ellipsis,
             );
         }
     }
@@ -946,6 +955,7 @@ impl ElementCx<'_, '_> {
                 self.scale,
                 self.node.id,
                 &mut draw_text_context,
+                None,
             );
         }
     }
@@ -1000,6 +1010,7 @@ impl ElementCx<'_, '_> {
                 self.scale,
                 self.node.id,
                 &mut draw_text_context,
+                None,
             );
         }
     }

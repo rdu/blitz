@@ -561,6 +561,7 @@ pub(crate) fn stroke_text<'a>(
     scale: f64,
     inline_root_id: NodeId,
     context: &mut DrawTextContext,
+    ellipsis: Option<f32>,
 ) {
     let DrawTextContext {
         stack,
@@ -585,6 +586,14 @@ pub(crate) fn stroke_text<'a>(
         // draws one decoration per box rather than one stepped segment per differently-sized
         // run. Clearing preserves the allocation for the next line and inline context.
         deco_boxes.clear();
+
+        // `text-overflow: ellipsis`: glyphs that end after `cut` are left
+        // out and "…" is drawn after the last one kept (in the font, size
+        // and colour of the run where the line was cut). Boxes are rounded
+        // to whole pixels: a line within one pixel of its box fits.
+        let limit = ellipsis.filter(|w| line.metrics().advance > *w + scale as f32);
+        let mut kept_end: Option<f32> = None;
+        let mut cut_run: Option<EllipsisRun> = None;
 
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -636,6 +645,34 @@ pub(crate) fn stroke_text<'a>(
                 };
 
                 let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
+                let cut = limit.map(|w| {
+                    let dots = cut_run
+                        .as_ref()
+                        .map(|c| c.advance)
+                        .or_else(|| ellipsis_glyphs(font, font_size).map(|(_, a)| a))
+                        .unwrap_or(0.0);
+                    w - dots
+                });
+                if let Some(cut) = cut {
+                    for g in glyph_run.positioned_glyphs() {
+                        if g.x + g.advance <= cut + 0.01 {
+                            kept_end =
+                                Some(kept_end.map_or(g.x + g.advance, |e| e.max(g.x + g.advance)));
+                        } else if cut_run.is_none() {
+                            if let Some((glyphs, advance)) = ellipsis_glyphs(font, font_size) {
+                                cut_run = Some(EllipsisRun {
+                                    font: font.clone(),
+                                    font_size,
+                                    color: text_color,
+                                    baseline: g.y,
+                                    glyphs,
+                                    advance,
+                                    transform: glyph_xform,
+                                });
+                            }
+                        }
+                    }
+                }
                 scene.draw_glyphs(
                     font,
                     font_size,
@@ -647,11 +684,14 @@ pub(crate) fn stroke_text<'a>(
                     1.0, // alpha
                     transform,
                     glyph_xform,
-                    glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
-                        id: glyph.id as _,
-                        x: glyph.x,
-                        y: glyph.y,
-                    }),
+                    glyph_run
+                        .positioned_glyphs()
+                        .filter(|g| cut.is_none_or(|cut| g.x + g.advance <= cut + 0.01))
+                        .map(|glyph| anyrender::Glyph {
+                            id: glyph.id as _,
+                            x: glyph.x,
+                            y: glyph.y,
+                        }),
                 );
 
                 // Accumulate this run's contribution to each decorating box on its ancestor
@@ -706,6 +746,36 @@ pub(crate) fn stroke_text<'a>(
             }
         }
 
+        if let (Some(_), Some(c)) = (limit, cut_run.take()) {
+            let mut x = kept_end.unwrap_or(line.metrics().offset);
+            let glyphs: Vec<anyrender::Glyph> = c
+                .glyphs
+                .iter()
+                .map(|(id, adv)| {
+                    let g = anyrender::Glyph {
+                        id: *id,
+                        x,
+                        y: c.baseline,
+                    };
+                    x += adv;
+                    g
+                })
+                .collect();
+            scene.draw_glyphs(
+                &c.font,
+                c.font_size,
+                !FONT_EMBOLDEN_ENABLED,
+                &[],
+                kurbo::Vec2::default(),
+                Fill::NonZero,
+                &anyrender::Paint::from(c.color),
+                1.0,
+                transform,
+                c.transform,
+                glyphs.into_iter(),
+            );
+        }
+
         flush_line_decorations(
             scene,
             transform,
@@ -735,4 +805,39 @@ pub(crate) fn draw_text_selection(
         let rect = kurbo::Rect::new(rect.x0, rect.y0, rect.x1, rect.y1);
         scene.fill(Fill::NonZero, transform, SELECTION_COLOR, None, &rect);
     });
+}
+
+/// The glyph run that ends a line cut by `text-overflow: ellipsis`.
+struct EllipsisRun {
+    font: parley::FontData,
+    font_size: f32,
+    color: Color,
+    baseline: f32,
+    /// Glyph ids and advances: "…", or "..." when the font has no "…".
+    glyphs: Vec<(u32, f32)>,
+    advance: f32,
+    transform: Option<Affine>,
+}
+
+/// Glyphs of the ellipsis in `font` at `font_size` (device px): "…"
+/// (U+2026), or three full stops when the font lacks it; `None` when the
+/// font has neither. Variable-font coordinates are not applied.
+fn ellipsis_glyphs(font: &parley::FontData, font_size: f32) -> Option<(Vec<(u32, f32)>, f32)> {
+    use skrifa::{
+        MetadataProvider as _,
+        instance::{LocationRef, Size},
+    };
+    let f = skrifa::FontRef::from_index(font.data.as_ref(), font.index).ok()?;
+    let map = f.charmap();
+    let metrics = f.glyph_metrics(Size::new(font_size), LocationRef::default());
+    let one = |c: char| {
+        let gid = map.map(c)?;
+        Some((gid.to_u32(), metrics.advance_width(gid)?))
+    };
+    let glyphs = match one('\u{2026}') {
+        Some(g) => vec![g],
+        None => vec![one('.')?; 3],
+    };
+    let advance = glyphs.iter().map(|(_, a)| a).sum();
+    Some((glyphs, advance))
 }
