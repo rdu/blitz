@@ -614,6 +614,18 @@ impl BuildBezpath for BezPath {
 
 /// Get the start angle of the arc based on the border width and the radii
 fn start_angle(bt_width: f64, br_width: f64, radii: Vec2) -> f64 {
+    // Zero widths make the slope below 0/0 or x/0 and the result NaN. A
+    // side without width owns none of the corner: with no top/bottom width
+    // the corner belongs to the left/right edge (t = pi/2), with no
+    // left/right width to the top/bottom edge (t = 0); with neither it is
+    // split as for equal widths.
+    match (bt_width > 0.0, br_width > 0.0) {
+        (false, false) => return start_angle(1.0, 1.0, radii),
+        (false, true) => return FRAC_PI_2,
+        (true, false) => return 0.0,
+        (true, true) => {}
+    }
+
     // slope of the border intersection split
     let w = bt_width / br_width;
     let x = radii.y / (w * radii.x);
@@ -769,6 +781,62 @@ mod tests {
         for &(bt, br) in &[(1.0, 1.0), (1.0, 4.0), (4.0, 1.0), (3.0, 7.0)] {
             for &(rx, ry) in &[(80.0, 30.0), (30.0, 80.0), (60.0, 60.0), (120.0, 20.0)] {
                 assert_solves(bt, br, Vec2 { x: rx, y: ry });
+            }
+        }
+    }
+
+    /// Regression test: a rounded box whose border is zero on one side of a
+    /// corner and non-zero on the other (e.g. `border: 1px solid` at a device
+    /// pixel ratio of 4/3, where Stylo snaps the width to 0.75px and Taffy's
+    /// rounding turns it into 1px on two sides and 0px on the others) is drawn
+    /// edge by edge. `start_angle` divided `0 / width` and then `radius / 0`,
+    /// giving `inf / inf = NaN`, so every edge path of the box was NaN and the
+    /// renderer dropped the whole border ("A path contains NaN").
+    #[test]
+    fn zero_width_sides_give_finite_edges() {
+        // A zero width on the top/bottom side: the corner belongs to the
+        // left/right edge entirely (t = pi/2); on the left/right side: to the
+        // top/bottom edge (t = 0); on both: split as for equal widths.
+        let r = Vec2 { x: 13.0, y: 13.0 };
+        assert_eq!(start_angle(0.0, 1.5, r), FRAC_PI_2);
+        assert_eq!(start_angle(1.5, 0.0, r), 0.0);
+        let quarter = std::f64::consts::FRAC_PI_4;
+        assert!((start_angle(0.0, 0.0, r) - quarter).abs() < 1e-12);
+
+        for widths in [
+            Insets::new(1.5, 0.0, 1.5, 0.0),
+            Insets::new(0.0, 1.5, 0.0, 1.5),
+            Insets::new(1.5, 0.0, 0.0, 0.0),
+            Insets::new(0.0, 0.0, 0.0, 0.0),
+        ] {
+            let b = CssBox::new(
+                Rect::new(0.0, 0.0, 1257.0, 1970.0),
+                widths,
+                Insets::ZERO,
+                0.0,
+                NonUniformRoundedRectRadii {
+                    top_left: Vec2::new(13.0, 13.0),
+                    top_right: Vec2::new(13.0, 13.0),
+                    bottom_right: Vec2::new(13.0, 13.0),
+                    bottom_left: Vec2::new(13.0, 13.0),
+                },
+            );
+            for edge in [Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
+                let path = b.border_edge_shape(edge);
+                for el in path.elements() {
+                    let pts = match *el {
+                        PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
+                        PathEl::QuadTo(a, c) => vec![a, c],
+                        PathEl::CurveTo(a, c, d) => vec![a, c, d],
+                        PathEl::ClosePath => vec![],
+                    };
+                    for p in pts {
+                        assert!(
+                            p.x.is_finite() && p.y.is_finite(),
+                            "{widths:?} {edge:?}: non-finite point {p:?}"
+                        );
+                    }
+                }
             }
         }
     }
