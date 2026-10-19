@@ -442,9 +442,74 @@ impl BaseDocument {
         // println!("\n\nRESOLVE LAYOUT\n===========\n");
 
         taffy::compute_root_layout(self, root_element_id, available_space);
-        taffy::round_layout(self, root_element_id);
+        round_layout_to_device_pixels(self, root_element_id, self.viewport.scale());
 
         // println!("\n\n");
         // taffy::print_tree(self, root_node_id)
+    }
+}
+
+/// Rounds the computed layout below `root` to whole device pixels (`scale`
+/// device pixels per CSS pixel), as `taffy::round_layout` rounds to whole
+/// CSS pixels: edges are rounded where they are on the page and sizes are
+/// the differences of rounded edges, so boxes still tile without gaps. At
+/// a fractional scale (e.g. 4/3) rounding in CSS pixels moves edges
+/// between device pixels: a `1px` border, which Stylo snaps to one device
+/// pixel (0.75 CSS px), became 1 or 0 CSS px depending on the box's
+/// position. Rounded in device pixels it stays one device pixel on every
+/// side. At scale 1 this is taffy's rounding.
+fn round_layout_to_device_pixels(tree: &mut BaseDocument, root: taffy::NodeId, scale: f32) {
+    use taffy::{RoundTree as _, TraversePartialTree as _};
+
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    inner(tree, root, 0.0, 0.0, scale);
+
+    /// `v` CSS px rounded to whole device pixels (half up, as taffy).
+    fn round(v: f32, scale: f32) -> f32 {
+        (v * scale + 0.5).floor() / scale
+    }
+
+    fn inner(tree: &mut BaseDocument, node: taffy::NodeId, px: f32, py: f32, s: f32) {
+        let u = tree.get_unrounded_layout(node);
+        let mut l = u;
+        let r = |v: f32| round(v, s);
+        let (x, y) = (px + u.location.x, py + u.location.y);
+        let (x1, y1) = (x + u.size.width, y + u.size.height);
+        l.location.x = r(x) - r(px);
+        l.location.y = r(y) - r(py);
+        l.size.width = r(x1) - r(x);
+        l.size.height = r(y1) - r(y);
+        l.scrollbar_size.width = r(u.scrollbar_size.width);
+        l.scrollbar_size.height = r(u.scrollbar_size.height);
+        l.border.left = r(x + u.border.left) - r(x);
+        l.border.right = r(x1) - r(x1 - u.border.right);
+        l.border.top = r(y + u.border.top) - r(y);
+        l.border.bottom = r(y1) - r(y1 - u.border.bottom);
+        l.padding.left = r(x + u.padding.left) - r(x);
+        l.padding.right = r(x1) - r(x1 - u.padding.right);
+        l.padding.top = r(y + u.padding.top) - r(y);
+        l.padding.bottom = r(y1) - r(y1 - u.padding.bottom);
+        let o = u.scrollable_overflow_rect;
+        l.scrollable_overflow_rect.left = r(x + o.left) - r(x);
+        l.scrollable_overflow_rect.right = r(x + o.right) - r(x);
+        l.scrollable_overflow_rect.top = r(y + o.top) - r(y);
+        l.scrollable_overflow_rect.bottom = r(y + o.bottom) - r(y);
+        tree.set_final_layout(node, &l);
+        // In-flow children here; out-of-flow ones from their containing
+        // block's hoisted list (their location is relative to it), as taffy.
+        for i in 0..tree.child_count(node) {
+            let child = tree.get_child_id(node, i);
+            if !tree.is_out_of_flow(child) {
+                inner(tree, child, x, y, s);
+            }
+        }
+        for i in 0..tree.hoisted_child_count(node) {
+            let child = tree.get_hoisted_child_id(node, i);
+            inner(tree, child, x, y, s);
+        }
     }
 }
