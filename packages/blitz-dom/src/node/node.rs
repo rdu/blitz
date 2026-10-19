@@ -1121,6 +1121,7 @@ impl Node {
         }
 
         stylo_taffy::TaffyStyloStyle::new(styles, flags)
+            .with_device_scale(self.tree().device_scale())
     }
 
     /// The node's `display` as a [`taffy::Display`]. Returns [`taffy::Display::Block`]

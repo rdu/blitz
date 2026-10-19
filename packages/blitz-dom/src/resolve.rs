@@ -441,6 +441,7 @@ impl BaseDocument {
 
         // println!("\n\nRESOLVE LAYOUT\n===========\n");
 
+        self.nodes.set_device_scale(self.viewport.scale());
         taffy::compute_root_layout(self, root_element_id, available_space);
         round_layout_to_device_pixels(self, root_element_id, self.viewport.scale());
 
@@ -454,10 +455,12 @@ impl BaseDocument {
 /// CSS pixels: edges are rounded where they are on the page and sizes are
 /// the differences of rounded edges, so boxes still tile without gaps. At
 /// a fractional scale (e.g. 4/3) rounding in CSS pixels moves edges
-/// between device pixels: a `1px` border, which Stylo snaps to one device
-/// pixel (0.75 CSS px), became 1 or 0 CSS px depending on the box's
-/// position. Rounded in device pixels it stays one device pixel on every
-/// side. At scale 1 this is taffy's rounding.
+/// between device pixels: a `1px` border, which Stylo snaps to whole
+/// device pixels (0.75 CSS px at 4/3), became 1 or 0 CSS px depending on
+/// the box's position. Here edges are rounded in device pixels and border
+/// widths are snapped to whole device pixels (at least one) on their own,
+/// so a `1px` border keeps its device pixels on every side. At scale 1
+/// this is taffy's rounding (borders there are whole pixels already).
 fn round_layout_to_device_pixels(tree: &mut BaseDocument, root: taffy::NodeId, scale: f32) {
     use taffy::{RoundTree as _, TraversePartialTree as _};
 
@@ -485,10 +488,24 @@ fn round_layout_to_device_pixels(tree: &mut BaseDocument, root: taffy::NodeId, s
         l.size.height = r(y1) - r(y);
         l.scrollbar_size.width = r(u.scrollbar_size.width);
         l.scrollbar_size.height = r(u.scrollbar_size.height);
-        l.border.left = r(x + u.border.left) - r(x);
-        l.border.right = r(x1) - r(x1 - u.border.right);
-        l.border.top = r(y + u.border.top) - r(y);
-        l.border.bottom = r(y1) - r(y1 - u.border.bottom);
+        // Border widths are snapped on their own (whole device pixels, at
+        // least one), not as differences of rounded edges. Layout already
+        // gets them snapped (`Node::layout_style`), so this only guards
+        // against f32 error and styles converted without a device scale
+        // (tables): a width just short of a device pixel would round to 0
+        // wherever the box's edge ends in .5 device px. The box's edges
+        // (and so its neighbours) are unchanged.
+        let bw = |w: f32| {
+            if w > 0.0 {
+                (w * s).round().max(1.0) / s
+            } else {
+                0.0
+            }
+        };
+        l.border.left = bw(u.border.left).min(l.size.width);
+        l.border.right = bw(u.border.right).min(l.size.width - l.border.left);
+        l.border.top = bw(u.border.top).min(l.size.height);
+        l.border.bottom = bw(u.border.bottom).min(l.size.height - l.border.top);
         l.padding.left = r(x + u.padding.left) - r(x);
         l.padding.right = r(x1) - r(x1 - u.padding.right);
         l.padding.top = r(y + u.padding.top) - r(y);

@@ -41,6 +41,9 @@ pub struct NodeTree {
     /// Scroll offset of the viewport (the root element scrolls the viewport,
     /// so its offset lives here rather than on the node).
     viewport_scroll: crate::Point<f64>,
+    /// Device pixels per CSS pixel of the last layout (0 before it), for
+    /// snapping border widths in [`Node::layout_style`](crate::Node::layout_style).
+    device_scale: f32,
 }
 
 impl NodeTree {
@@ -49,7 +52,18 @@ impl NodeTree {
             map: SlotMap::with_key(),
             geometry_generation: AtomicU64::new(1),
             viewport_scroll: crate::Point::ZERO,
+            device_scale: 0.0,
         }
+    }
+
+    /// Device pixels per CSS pixel that layout snaps border widths to (0
+    /// before the first layout: no snapping).
+    pub fn device_scale(&self) -> f32 {
+        self.device_scale
+    }
+
+    pub(crate) fn set_device_scale(&mut self, scale: f32) {
+        self.device_scale = scale;
     }
 
     pub fn viewport_scroll(&self) -> crate::Point<f64> {

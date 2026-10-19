@@ -30,12 +30,54 @@ pub struct TaffyStyloStyle<T: Deref<Target = ComputedValues>> {
     pub style: T,
     /// Extra node-derived flags that are not part of the stylo style
     pub flags: StyleFlags,
+    /// Device pixels per CSS pixel, when border widths are to be snapped to
+    /// whole device pixels (see [`TaffyStyloStyle::with_device_scale`]).
+    pub device_scale: Option<f32>,
 }
 
 impl<T: Deref<Target = ComputedValues>> TaffyStyloStyle<T> {
     /// Create a new [`TaffyStyloStyle`] from a stylo style and [`StyleFlags`]
     pub fn new(style: T, flags: StyleFlags) -> Self {
-        Self { style, flags }
+        Self {
+            style,
+            flags,
+            device_scale: None,
+        }
+    }
+
+    /// Snap border widths to whole device pixels at `scale` device pixels
+    /// per CSS pixel. Stylo already snaps them, but in app units, and its
+    /// device pixel is a whole number of app units (`60 / scale`,
+    /// truncated): at 1.75 a `1px` border is 34 Au = 0.9917 device px, so
+    /// boxes inside it start just short of the device pixel after it and
+    /// rounding puts them on the border. Snapped here, layout places them
+    /// after whole device pixels.
+    pub fn with_device_scale(mut self, scale: f32) -> Self {
+        if scale.is_finite() && scale > 0.0 {
+            self.device_scale = Some(scale);
+        }
+        self
+    }
+
+    /// `side` as a border width, snapped to whole device pixels (at least
+    /// one when non-zero) if a device scale is set.
+    fn snapped_border(
+        &self,
+        width: &stylo::BorderSideWidth,
+        style: stylo::BorderStyle,
+    ) -> taffy::LengthPercentage {
+        let border = convert::border(width, style);
+        match self.device_scale {
+            Some(s) if !style.none_or_hidden() => {
+                let w = width.0.to_f32_px();
+                if w > 0.0 {
+                    taffy::style_helpers::length((w * s).round().max(1.0) / s)
+                } else {
+                    border
+                }
+            }
+            _ => border,
+        }
     }
 }
 
@@ -45,6 +87,7 @@ impl<T: Deref<Target = ComputedValues>> From<T> for TaffyStyloStyle<T> {
         Self {
             style: value,
             flags: StyleFlags::empty(),
+            device_scale: None,
         }
     }
 }
@@ -180,19 +223,19 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
     fn border(&self) -> taffy::Rect<taffy::LengthPercentage> {
         let border_styles = self.style.get_border();
         taffy::Rect {
-            left: convert::border(
+            left: self.snapped_border(
                 &border_styles.border_left_width,
                 border_styles.border_left_style,
             ),
-            right: convert::border(
+            right: self.snapped_border(
                 &border_styles.border_right_width,
                 border_styles.border_right_style,
             ),
-            top: convert::border(
+            top: self.snapped_border(
                 &border_styles.border_top_width,
                 border_styles.border_top_style,
             ),
-            bottom: convert::border(
+            bottom: self.snapped_border(
                 &border_styles.border_bottom_width,
                 border_styles.border_bottom_style,
             ),
