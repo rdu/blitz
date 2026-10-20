@@ -165,9 +165,7 @@ impl ShellProvider for BlitzShellProvider {
         )
     ))]
     fn get_clipboard_text(&self) -> Result<String, blitz_traits::shell::ClipboardError> {
-        let mut cb = arboard::Clipboard::new().unwrap();
-        cb.get_text()
-            .map_err(|_| blitz_traits::shell::ClipboardError)
+        with_clipboard(arboard::Clipboard::new, |cb| cb.get_text())
     }
 
     #[cfg(all(
@@ -183,9 +181,7 @@ impl ShellProvider for BlitzShellProvider {
         )
     ))]
     fn set_clipboard_text(&self, text: String) -> Result<(), blitz_traits::shell::ClipboardError> {
-        let mut cb = arboard::Clipboard::new().unwrap();
-        cb.set_text(text.to_owned())
-            .map_err(|_| blitz_traits::shell::ClipboardError)
+        with_clipboard(arboard::Clipboard::new, |cb| cb.set_text(text))
     }
 
     #[cfg(all(
@@ -215,5 +211,60 @@ impl ShellProvider for BlitzShellProvider {
             dialog.pick_file().map(|file| vec![file])
         };
         files.unwrap_or_default()
+    }
+}
+
+/// Opens the system clipboard with `open` and uses it: a clipboard that
+/// cannot be opened (no display server connection, a headless session) or
+/// used is a [`ClipboardError`](blitz_traits::shell::ClipboardError), never a
+/// panic.
+#[cfg(all(
+    feature = "clipboard",
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )
+))]
+fn with_clipboard<T>(
+    open: impl FnOnce() -> Result<arboard::Clipboard, arboard::Error>,
+    use_it: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T, blitz_traits::shell::ClipboardError> {
+    let mut cb = open().map_err(|_| blitz_traits::shell::ClipboardError)?;
+    use_it(&mut cb).map_err(|_| blitz_traits::shell::ClipboardError)
+}
+
+#[cfg(all(
+    test,
+    feature = "clipboard",
+    any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )
+))]
+mod clipboard_tests {
+    use super::with_clipboard;
+
+    #[test]
+    fn a_clipboard_that_cannot_be_opened_is_an_error_not_a_panic() {
+        let r: Result<String, _> = with_clipboard(
+            || Err(arboard::Error::ClipboardNotSupported),
+            |cb| cb.get_text(),
+        );
+        assert!(r.is_err());
+        let r = with_clipboard(
+            || Err(arboard::Error::ClipboardOccupied),
+            |cb| cb.set_text("x"),
+        );
+        assert!(r.is_err());
     }
 }
