@@ -343,7 +343,13 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
             y: final_layout.padding.top + final_layout.border.top,
         };
         if !text_input_data.is_multiline {
-            let layout = text_input_data.editor.try_layout().unwrap();
+            // The editor's layout is rebuilt by the next `resolve`; until then
+            // a drag does not move the selection.
+            let Some(layout) = text_input_data.editor.try_layout() else {
+                #[cfg(feature = "tracing")]
+                tracing::warn!("pointermove: text input layout is not ready");
+                return changed;
+            };
             let content_box_height = final_layout.content_box_height();
             let input_height = layout.height() / layout.scale();
             let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
@@ -443,7 +449,10 @@ pub(crate) fn handle_pointerdown(
     // Check what kind of element we're dealing with and extract needed info
     enum ClickTarget {
         TextInput {
-            content_box_offset: taffy::Point<f32>,
+            /// `None` while the editor's layout is not ready (it is rebuilt by
+            /// the next `resolve`): the click focuses the input but places no
+            /// cursor.
+            content_box_offset: Option<taffy::Point<f32>>,
             /// Scroll offset of the input along each axis, in scaled (device) pixels.
             scroll: taffy::Point<f64>,
         },
@@ -461,12 +470,18 @@ pub(crate) fn handle_pointerdown(
                         x: node.final_layout().padding.left + node.final_layout().border.left,
                         y: node.final_layout().padding.top + node.final_layout().border.top,
                     };
+                    let mut layout_ready = true;
                     if !text_input_data.is_multiline {
-                        let layout = text_input_data.editor.try_layout().unwrap();
-                        let content_box_height = node.final_layout().content_box_height();
-                        let input_height = layout.height() / layout.scale();
-                        let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
-                        content_box_offset.y += y_offset;
+                        if let Some(layout) = text_input_data.editor.try_layout() {
+                            let content_box_height = node.final_layout().content_box_height();
+                            let input_height = layout.height() / layout.scale();
+                            let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
+                            content_box_offset.y += y_offset;
+                        } else {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!("pointerdown: text input layout is not ready");
+                            layout_ready = false;
+                        }
                     }
                     // `scroll_offset` is stored in CSS pixels; scale it to device pixels to
                     // match the editor's coordinate space.
@@ -484,7 +499,7 @@ pub(crate) fn handle_pointerdown(
                         }
                     };
                     ClickTarget::TextInput {
-                        content_box_offset,
+                        content_box_offset: layout_ready.then_some(content_box_offset),
                         scroll,
                     }
                 } else {
@@ -513,14 +528,17 @@ pub(crate) fn handle_pointerdown(
             // Clear general text selection when focusing a text input
             doc.clear_text_selection();
 
-            let tx = (hit.x - content_box_offset.x) as f64 * doc.viewport.scale_f64() + scroll.x;
-            let ty = (hit.y - content_box_offset.y) as f64 * doc.viewport.scale_f64() + scroll.y;
-
             // Now get mutable access to the text input
             let click_count = doc.click_count;
+            let scale = doc.viewport.scale_f64();
             let node = &mut doc.nodes[actual_target];
             let el = node.data.downcast_element_mut().unwrap();
-            if let SpecialElementData::TextInput(ref mut text_input_data) = el.special_data {
+            if let (Some(content_box_offset), SpecialElementData::TextInput(text_input_data)) =
+                (content_box_offset, &mut el.special_data)
+            {
+                let tx = (hit.x - content_box_offset.x) as f64 * scale + scroll.x;
+                let ty = (hit.y - content_box_offset.y) as f64 * scale + scroll.y;
+
                 let mut font_ctx = doc.font_ctx.lock().unwrap();
                 let mut driver = text_input_data
                     .editor

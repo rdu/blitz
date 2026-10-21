@@ -722,7 +722,13 @@ impl Node {
             .is_some()
         {
             shell_provider.set_ime_enabled(true);
-            let mut pos = self.absolute_position(0.0, 0.0);
+            // A containing block that is gone gives no position until the
+            // next layout: leave the IME cursor area as it is.
+            let Some(mut pos) = self.try_absolute_position(0.0, 0.0) else {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(node_id = ?self.id, "focus: no IME cursor area, a containing block is gone");
+                return;
+            };
             pos.x += self.final_layout().content_box_x();
             pos.y += self.final_layout().content_box_y();
             let width = self.final_layout().content_box_width();
@@ -813,8 +819,15 @@ impl Node {
             .and_then(|el| el.text_input_data())
         {
             if !input_data.is_multiline {
+                // The editor's layout is rebuilt by the next `resolve`; until
+                // then the text is not centred.
+                let Some(layout) = input_data.editor.try_layout() else {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(node_id = ?self.id, "text input layout is not ready");
+                    return 0.0;
+                };
                 let content_box_height = self.final_layout().content_box_height();
-                let input_height = input_data.editor.try_layout().unwrap().height() / scale as f32;
+                let input_height = layout.height() / scale as f32;
                 let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
 
                 return y_offset as f64;
@@ -1549,25 +1562,63 @@ impl Node {
     }
 
     /// Computes the Document-relative coordinates of the `Node`
+    ///
+    /// A containing block that no longer exists (see
+    /// [`try_absolute_position`](Self::try_absolute_position)) ends the walk
+    /// with a warning: the result is then relative to the last box found.
     pub fn absolute_position(&self, x: f32, y: f32) -> crate::util::Point<f32> {
-        let x = x + self.final_layout().location.x - self.scroll_offset().x as f32;
-        let y = y + self.final_layout().location.y - self.scroll_offset().y as f32;
+        let (pos, complete) = self.position_up_containing_blocks(x, y, Node::final_layout);
+        if !complete {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(node_id = ?self.id, "absolute_position: a containing block is gone");
+        }
+        pos
+    }
 
-        // Recurse up the positioning hierarchy
-        self.containing_block()
-            .map(|i| self.with(i).absolute_position(x, y))
-            .unwrap_or(crate::util::Point { x, y })
+    /// Like [`absolute_position`](Self::absolute_position), but `None` when a
+    /// containing block on the way up no longer exists: a cached
+    /// `layout_parent` or `oof_containing_block` that still names a removed
+    /// node until the next layout.
+    pub fn try_absolute_position(&self, x: f32, y: f32) -> Option<crate::util::Point<f32>> {
+        let (pos, complete) = self.position_up_containing_blocks(x, y, Node::final_layout);
+        complete.then_some(pos)
     }
 
     /// Computes the Document-relative coordinates of the `Node` from the unrounded
     /// (sub-pixel) layout, for CSSOM geometry APIs such as `getBoundingClientRect`
     pub fn unrounded_absolute_position(&self, x: f32, y: f32) -> crate::util::Point<f32> {
-        let x = x + self.unrounded_layout().location.x - self.scroll_offset().x as f32;
-        let y = y + self.unrounded_layout().location.y - self.scroll_offset().y as f32;
+        let (pos, complete) = self.position_up_containing_blocks(x, y, Node::unrounded_layout);
+        if !complete {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                node_id = ?self.id,
+                "unrounded_absolute_position: a containing block is gone"
+            );
+        }
+        pos
+    }
 
-        self.containing_block()
-            .map(|i| self.with(i).unrounded_absolute_position(x, y))
-            .unwrap_or(crate::util::Point { x, y })
+    /// Adds the location (in `layout`) of this node and of each containing
+    /// block above it to (x, y). The flag is false when a containing block no
+    /// longer exists; the walk stops there instead of panicking.
+    fn position_up_containing_blocks(
+        &self,
+        mut x: f32,
+        mut y: f32,
+        layout: fn(&Node) -> &Layout,
+    ) -> (crate::util::Point<f32>, bool) {
+        let mut node = self;
+        loop {
+            x += layout(node).location.x - node.scroll_offset().x as f32;
+            y += layout(node).location.y - node.scroll_offset().y as f32;
+            let Some(id) = node.containing_block() else {
+                return (crate::util::Point { x, y }, true);
+            };
+            let Some(parent) = node.tree().get(id) else {
+                return (crate::util::Point { x, y }, false);
+            };
+            node = parent;
+        }
     }
 
     /// Whether this node can act as an [`offset_parent`](Self::offset_parent): a positioned
